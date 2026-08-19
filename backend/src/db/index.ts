@@ -1,17 +1,17 @@
-import Database from "better-sqlite3";
+import { DatabaseSync } from "node:sqlite";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const dbPath = path.join(__dirname, "..", "..", "data.sqlite");
 
-export const db = new Database(dbPath);
-db.pragma("journal_mode = WAL");
+// Uses Node's built-in SQLite module (node:sqlite) instead of the
+// better-sqlite3 native addon. This avoids the native-compilation step
+// entirely (no Visual Studio / build-tools / node-gyp required on
+// Windows), at the cost of requiring a fairly recent Node version
+// (v22.5+, unflagged from ~v23). Requires Node >= 22.5.0.
+export const db = new DatabaseSync(dbPath);
 
-// Notes table: each row is a chunk of campaign lore with its embedding
-// stored as a JSON-encoded float array. This is intentionally simple
-// (no vector extension required) so the project runs anywhere SQLite runs.
-// Swap this for pgvector/Pinecone/Chroma if you outgrow in-memory cosine search.
 db.exec(`
   CREATE TABLE IF NOT EXISTS notes (
     id TEXT PRIMARY KEY,

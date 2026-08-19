@@ -42,21 +42,29 @@ export async function addNote(
     `INSERT INTO notes (id, title, content, category, embedding) VALUES (?, ?, ?, ?, ?)`
   );
 
+  // node:sqlite has no built-in .transaction() helper (unlike better-sqlite3),
+  // so wrap the batch insert manually to keep it atomic.
   const inserted: Note[] = [];
-  const insertMany = db.transaction((rows: { chunk: string; embedding: number[] }[]) => {
-    for (const { chunk, embedding } of rows) {
+  db.exec("BEGIN");
+  try {
+    for (let i = 0; i < chunks.length; i++) {
       const id = uuidv4();
-      insert.run(id, title, chunk, category, JSON.stringify(embedding));
-      inserted.push({ id, title, content: chunk, category, createdAt: new Date().toISOString() });
+      insert.run(id, title, chunks[i], category, JSON.stringify(embeddings[i]));
+      inserted.push({ id, title, content: chunks[i], category, createdAt: new Date().toISOString() });
     }
-  });
+    db.exec("COMMIT");
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
+  }
 
-  insertMany(chunks.map((chunk, i) => ({ chunk, embedding: embeddings[i] })));
   return inserted;
 }
 
 export function listNotes(): Note[] {
-  const rows = db.prepare(`SELECT * FROM notes ORDER BY created_at DESC`).all() as NoteRow[];
+  const rows = db
+    .prepare(`SELECT * FROM notes ORDER BY created_at DESC`)
+    .all() as unknown as NoteRow[];
   return rows.map(rowToNote);
 }
 
@@ -74,7 +82,7 @@ export async function retrieveRelevantNotes(
   query: string,
   topK = 5
 ): Promise<RetrievedNote[]> {
-  const rows = db.prepare(`SELECT * FROM notes`).all() as NoteRow[];
+  const rows = db.prepare(`SELECT * FROM notes`).all() as unknown as NoteRow[];
   if (rows.length === 0) return [];
 
   const queryEmbedding = await embedQuery(query);

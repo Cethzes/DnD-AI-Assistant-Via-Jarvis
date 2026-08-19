@@ -1,69 +1,36 @@
-const VOYAGE_API_URL = "https://api.voyageai.com/v1/embeddings";
-const EMBEDDING_MODEL = "voyage-3.5-lite"; // small + cheap, plenty for campaign notes
+const OLLAMA_URL = process.env.OLLAMA_URL || "http://localhost:11434";
+const EMBEDDING_MODEL = process.env.OLLAMA_EMBED_MODEL || "nomic-embed-text";
 
-/**
- * Anthropic doesn't serve its own embeddings endpoint; Voyage AI is their
- * recommended embeddings partner (see docs.claude.com -> "Embeddings").
- * This wraps a single call to embed one or more text chunks.
- */
-export async function embedTexts(texts: string[]): Promise<number[][]> {
-  const apiKey = process.env.VOYAGE_API_KEY;
-  if (!apiKey) {
+async function embedOne(text: string): Promise<number[]> {
+  const res = await fetch(`${OLLAMA_URL}/api/embeddings`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: EMBEDDING_MODEL, prompt: text }),
+  });
+
+  if (!res.ok) {
+    const body = await res.text();
     throw new Error(
-      "VOYAGE_API_KEY is not set. Add it to your .env file (see .env.example)."
+      `Ollama embeddings request failed (${res.status}): ${body}\n` +
+        `Make sure you've pulled the embedding model: "ollama pull ${EMBEDDING_MODEL}"`
     );
   }
 
-  const response = await fetch(VOYAGE_API_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      input: texts,
-      model: EMBEDDING_MODEL,
-      input_type: "document",
-    }),
-  });
+  const data = (await res.json()) as { embedding: number[] };
+  return data.embedding;
+}
 
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`Voyage embeddings request failed (${response.status}): ${body}`);
-  }
-
-  const data = (await response.json()) as { data: { embedding: number[] }[] };
-  return data.data.map((d) => d.embedding);
+/**
+ * Ollama's /api/embeddings endpoint embeds one prompt per call (no native
+ * batch endpoint), so we just fire requests concurrently. Fine at the
+ * scale of a DM's campaign notes.
+ */
+export async function embedTexts(texts: string[]): Promise<number[][]> {
+  return Promise.all(texts.map(embedOne));
 }
 
 export async function embedQuery(text: string): Promise<number[]> {
-  const apiKey = process.env.VOYAGE_API_KEY;
-  if (!apiKey) {
-    throw new Error(
-      "VOYAGE_API_KEY is not set. Add it to your .env file (see .env.example)."
-    );
-  }
-
-  const response = await fetch(VOYAGE_API_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      input: [text],
-      model: EMBEDDING_MODEL,
-      input_type: "query",
-    }),
-  });
-
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`Voyage embeddings request failed (${response.status}): ${body}`);
-  }
-
-  const data = (await response.json()) as { data: { embedding: number[] }[] };
-  return data.data[0].embedding;
+  return embedOne(text);
 }
 
 export function cosineSimilarity(a: number[], b: number[]): number {

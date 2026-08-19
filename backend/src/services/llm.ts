@@ -1,8 +1,7 @@
-import Anthropic from "@anthropic-ai/sdk";
 import type { RetrievedNote } from "./notesStore.js";
 
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-const MODEL = process.env.CLAUDE_MODEL || "claude-sonnet-5";
+const OLLAMA_URL = process.env.OLLAMA_URL || "http://localhost:11434";
+const MODEL = process.env.OLLAMA_MODEL || "llama3.1";
 
 const SYSTEM_PROMPT = `You are an assistant for a tabletop Dungeons & Dragons Dungeon Master.
 You help the DM improvise NPC dialogue, recall plot threads, and generate flavor text
@@ -28,51 +27,101 @@ function buildContextBlock(notes: RetrievedNote[]): string {
     .join("\n\n---\n\n");
 }
 
+function buildMessages(question: string, retrievedNotes: RetrievedNote[]) {
+  const contextBlock = buildContextBlock(retrievedNotes);
+  return [
+    { role: "system", content: SYSTEM_PROMPT },
+    {
+      role: "user",
+      content: `Campaign notes retrieved for this question:\n\n${contextBlock}\n\n---\n\nDM's question: ${question}`,
+    },
+  ];
+}
+
+async function assertOllamaReachable() {
+  try {
+    const res = await fetch(`${OLLAMA_URL}/api/tags`);
+    if (!res.ok) throw new Error();
+  } catch {
+    throw new Error(
+      `Can't reach Ollama at ${OLLAMA_URL}. Make sure Ollama is installed and running ` +
+        `("ollama serve", or just open the Ollama app), and that you've pulled a model ` +
+        `(e.g. "ollama pull ${MODEL}").`
+    );
+  }
+}
+
 export async function generateAnswer(
   question: string,
   retrievedNotes: RetrievedNote[]
 ): Promise<string> {
-  const contextBlock = buildContextBlock(retrievedNotes);
+  await assertOllamaReachable();
 
-  const message = await anthropic.messages.create({
-    model: MODEL,
-    max_tokens: 1024,
-    system: SYSTEM_PROMPT,
-    messages: [
-      {
-        role: "user",
-        content: `Campaign notes retrieved for this question:\n\n${contextBlock}\n\n---\n\nDM's question: ${question}`,
-      },
-    ],
+  const res = await fetch(`${OLLAMA_URL}/api/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: MODEL,
+      messages: buildMessages(question, retrievedNotes),
+      stream: false,
+    }),
   });
 
-  const textBlock = message.content.find((block) => block.type === "text");
-  return textBlock && textBlock.type === "text" ? textBlock.text : "";
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`Ollama request failed (${res.status}): ${body}`);
+  }
+
+  const data = (await res.json()) as { message: { content: string } };
+  return data.message.content;
 }
 
 /**
  * Streaming variant used by the /api/chat SSE endpoint so the frontend
  * can render tokens as they arrive instead of waiting for the full reply.
+ * Ollama's /api/chat with stream:true returns newline-delimited JSON objects.
  */
 export async function streamAnswer(
   question: string,
   retrievedNotes: RetrievedNote[],
   onToken: (token: string) => void
 ): Promise<void> {
-  const contextBlock = buildContextBlock(retrievedNotes);
+  await assertOllamaReachable();
 
-  const stream = anthropic.messages.stream({
-    model: MODEL,
-    max_tokens: 1024,
-    system: SYSTEM_PROMPT,
-    messages: [
-      {
-        role: "user",
-        content: `Campaign notes retrieved for this question:\n\n${contextBlock}\n\n---\n\nDM's question: ${question}`,
-      },
-    ],
+  const res = await fetch(`${OLLAMA_URL}/api/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: MODEL,
+      messages: buildMessages(question, retrievedNotes),
+      stream: true,
+    }),
   });
 
-  stream.on("text", (token) => onToken(token));
-  await stream.finalMessage();
+  if (!res.ok || !res.body) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`Ollama request failed (${res.status}): ${body}`);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      const parsed = JSON.parse(line) as {
+        message?: { content: string };
+        done: boolean;
+      };
+      if (parsed.message?.content) onToken(parsed.message.content);
+    }
+  }
 }
