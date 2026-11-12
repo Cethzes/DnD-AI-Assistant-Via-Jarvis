@@ -36,7 +36,8 @@ export async function addNote(
   category: string
 ): Promise<Note[]> {
   const chunks = chunkText(content);
-  const embeddings = await embedTexts(chunks);
+  // Title goes into each chunk's vector so later chunks stay findable by the note's subject.
+  const embeddings = await embedTexts(chunks.map((c) => `${title}\n${c}`));
 
   const insert = db.prepare(
     `INSERT INTO notes (id, title, content, category, embedding) VALUES (?, ?, ?, ?, ?)`

@@ -1,36 +1,22 @@
-const OLLAMA_URL = process.env.OLLAMA_URL || "http://localhost:11434";
-const EMBEDDING_MODEL = process.env.OLLAMA_EMBED_MODEL || "nomic-embed-text";
+import { pipeline, type FeatureExtractionPipeline } from "@huggingface/transformers";
 
-async function embedOne(text: string): Promise<number[]> {
-  const res = await fetch(`${OLLAMA_URL}/api/embeddings`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model: EMBEDDING_MODEL, prompt: text }),
-  });
+// Runs in-process (ONNX); weights download once to the transformers.js cache on first use.
+const MODEL = "Xenova/bge-small-en-v1.5";
+// bge retrieves best when queries (not documents) carry this instruction.
+const QUERY_PREFIX = "Represent this sentence for searching relevant passages: ";
 
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(
-      `Ollama embeddings request failed (${res.status}): ${body}\n` +
-        `Make sure you've pulled the embedding model: "ollama pull ${EMBEDDING_MODEL}"`
-    );
-  }
+let extractor: Promise<FeatureExtractionPipeline> | undefined;
 
-  const data = (await res.json()) as { embedding: number[] };
-  return data.embedding;
+async function embed(texts: string[]): Promise<number[][]> {
+  extractor ??= pipeline("feature-extraction", MODEL, { dtype: "q8" });
+  const output = await (await extractor)(texts, { pooling: "cls", normalize: true });
+  return output.tolist() as number[][];
 }
 
-/**
- * Ollama's /api/embeddings endpoint embeds one prompt per call (no native
- * batch endpoint), so we just fire requests concurrently. Fine at the
- * scale of a DM's campaign notes.
- */
-export async function embedTexts(texts: string[]): Promise<number[][]> {
-  return Promise.all(texts.map(embedOne));
-}
+export const embedTexts = (texts: string[]) => embed(texts);
 
 export async function embedQuery(text: string): Promise<number[]> {
-  return embedOne(text);
+  return (await embed([QUERY_PREFIX + text]))[0];
 }
 
 export function cosineSimilarity(a: number[], b: number[]): number {
